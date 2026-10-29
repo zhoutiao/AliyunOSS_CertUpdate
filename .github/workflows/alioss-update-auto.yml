@@ -1,55 +1,104 @@
 name: alioss-update-auto
+
 env:
   TZ: Asia/Shanghai
 
 on:
   schedule:
-    - cron: "0 20 2 * *" # 时区对cron无效，所以要提前8个小时，
+    # GitHub Actions 的 cron 使用 UTC：每月 2 日 20:00 UTC = 北京时间 3 日 04:00。
+    # Let's Encrypt 证书有效期 90 天，每月检查一次即可（certbot 只在到期前 30 天内续期）。
+    - cron: "0 20 2 * *"
   workflow_dispatch:
 
 jobs:
-  build:
+  update-cert:
     runs-on: ubuntu-latest
 
+    # 域名与 Bucket 按编号一一配对：DOMAIN_1 <-> BUCKET_NAME_1，其余同理。
+    # CERT_NAME 是 certbot 的证书名，证书文件位于 /etc/letsencrypt/live/<CERT_NAME>/。
+    env:
+      CERT_NAME: jianglu-oss
+      DOMAIN_1: ${{ secrets.DOMAIN_1 }}
+      DOMAIN_2: ${{ secrets.DOMAIN_2 }}
+      DOMAIN_3: ${{ secrets.DOMAIN_3 }}
+      BUCKET_NAME_1: ${{ secrets.BUCKET_NAME_1 }}
+      BUCKET_NAME_2: ${{ secrets.BUCKET_NAME_2 }}
+      BUCKET_NAME_3: ${{ secrets.BUCKET_NAME_3 }}
+
     steps:
-      - uses: actions/checkout@v2
+      - name: Checkout
+        uses: actions/checkout@v4
 
       - name: Init Action
         run: |
-          sudo apt install -y certbot
+          sudo apt-get update
+          sudo apt-get install -y certbot
           pip install -r requirements.txt
 
-      - name: Aliyun Cli Tools
+      - name: Install Aliyun CLI and DNS Hook
         run: |
-          curl -o aliyun-cli.tgz https://aliyuncli.alicdn.com/aliyun-cli-linux-latest-amd64.tgz
-          tar xzvf aliyun-cli.tgz
+          curl -fsSL -o aliyun-cli.tgz https://aliyuncli.alicdn.com/aliyun-cli-linux-latest-amd64.tgz
+          tar xzf aliyun-cli.tgz
           sudo mv aliyun /usr/local/bin/
           sudo aliyun configure set --profile akProfile --mode AK \
-            --access-key-id ${{ secrets.ACCESS_KEY_ID }} \
-            --access-key-secret ${{ secrets.ACCESS_KEY_SECRET }} \
-            --region ${{ secrets.REGION }}
+            --access-key-id "${{ secrets.ACCESS_KEY_ID }}" \
+            --access-key-secret "${{ secrets.ACCESS_KEY_SECRET }}" \
+            --region "${{ secrets.REGION }}"
 
           sudo mv alidns.sh /usr/local/bin/alidns
           sudo chmod +x /usr/local/bin/alidns
 
-      - name: Apply for a new certificate
+      - name: Issue multi-domain certificate
         run: |
-          sudo mkdir -p /etc/letsencrypt/certs
-          sudo certbot certonly -d "${{ secrets.DOMAIN }}" --manual --preferred-challenges dns \
-                --manual-auth-hook "/usr/local/bin/alidns" \
-                --manual-cleanup-hook "/usr/local/bin/alidns clean" \
-                --agree-tos --email ${{ secrets.EMAIL }} --non-interactive
+          set -euo pipefail
+          DOMAINS=("$DOMAIN_1" "$DOMAIN_2" "$DOMAIN_3")
 
-      - name: Run OSS Cert Update
+          CERTBOT_ARGS=()
+          for i in "${!DOMAINS[@]}"; do
+            if [ -z "${DOMAINS[$i]}" ]; then
+              echo "DOMAIN_$((i + 1)) 为空，请检查 repository secrets"
+              exit 1
+            fi
+            CERTBOT_ARGS+=(-d "${DOMAINS[$i]}")
+          done
+
+          echo "证书名：$CERT_NAME"
+          echo "域名列表：${DOMAINS[*]}"
+
+          # 一次申请一张覆盖所有域名的 SAN 证书，存放于 /etc/letsencrypt/live/$CERT_NAME/
+          # --expand：以后新增域名时，非交互模式下也允许扩展证书
+          sudo certbot certonly --cert-name "$CERT_NAME" "${CERTBOT_ARGS[@]}" \
+            --expand \
+            --manual --preferred-challenges dns \
+            --manual-auth-hook "/usr/local/bin/alidns" \
+            --manual-cleanup-hook "/usr/local/bin/alidns clean" \
+            --agree-tos --email "${{ secrets.EMAIL }}" --non-interactive
+
+      - name: Update OSS certificate bindings
         run: |
-          CERT_PATH="/etc/letsencrypt/live/${{ secrets.DOMAIN }}"
-          export CERTIFICATE="$(sudo cat $CERT_PATH/fullchain.pem)"
-          export PRIVATE_KEY="$(sudo cat $CERT_PATH/privkey.pem)"
+          set -euo pipefail
+          DOMAINS=("$DOMAIN_1" "$DOMAIN_2" "$DOMAIN_3")
+          BUCKETS=("$BUCKET_NAME_1" "$BUCKET_NAME_2" "$BUCKET_NAME_3")
+          CERT_PATH="/etc/letsencrypt/live/$CERT_NAME"
+
+          MAPPING_ARGS=()
+          for i in "${!DOMAINS[@]}"; do
+            if [ -z "${DOMAINS[$i]}" ] || [ -z "${BUCKETS[$i]}" ]; then
+              echo "第 $((i + 1)) 组 DOMAIN_$((i + 1)) / BUCKET_NAME_$((i + 1)) 为空，请检查 repository secrets"
+              exit 1
+            fi
+            MAPPING_ARGS+=(--domain "${DOMAINS[$i]}" --bucket "${BUCKETS[$i]}")
+          done
+
+          export CERTIFICATE="$(sudo cat "$CERT_PATH/fullchain.pem")"
+          export PRIVATE_KEY="$(sudo cat "$CERT_PATH/privkey.pem")"
+
+          # 每个域名绑定到各自 Bucket；OSS 上已是同一张证书时脚本会自动跳过
           python oss_update.py \
             --access-key-id "${{ secrets.ACCESS_KEY_ID }}" \
             --access-key-secret "${{ secrets.ACCESS_KEY_SECRET }}" \
             --endpoint "${{ secrets.ENDPOINT }}" \
-            --bucket-name "${{ secrets.BUCKET_NAME }}" \
-            --target-cname "${{ secrets.DOMAIN }}" \
+            --region "${{ secrets.REGION }}" \
+            "${MAPPING_ARGS[@]}" \
             --private-key "$PRIVATE_KEY" \
             --certificate "$CERTIFICATE"

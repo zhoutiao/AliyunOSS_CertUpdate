@@ -2,3 +2,5 @@ oss2>=2.19.1
 requests>=2.32.3
 aliyun-python-sdk-alidns>=3.0.7
 aliyun-python-sdk-core>=2.16.0
+# 用于解析本地证书到期时间，避免 OSS 证书重复绑定；未安装时脚本会自动降级
+cryptography>=42.0.0

@@ -3,11 +3,12 @@
 自动化更新阿里云 OSS 自定义域名证书的解决方案。
 
 ## 项目简介
-本项目通过 GitHub Actions 自动申请 Let's Encrypt 证书，并将新证书自动绑定到阿里云 OSS 的自定义域名，实现证书自动续期和更新。
+本项目通过 GitHub Actions 自动申请一张覆盖多个域名的 Let's Encrypt 证书（SAN 多域名证书），
+并把同一张证书自动绑定到各自 OSS Bucket 的自定义域名，实现证书自动续期和更新。
 
 ## 主要文件说明
-- `oss_update.py`：核心脚本，负责将新证书绑定到 OSS Bucket 的自定义域名。
-- `alidns.sh`：用于 certbot DNS 验证的钩子脚本。
+- `oss_update.py`：核心脚本，按成对传入的 `--domain` / `--bucket` 映射，把证书逐个绑定到各 Bucket 的自定义域名。
+- `alidns.sh`：用于 certbot DNS-01 验证的钩子脚本，自动增删 `_acme-challenge` TXT 记录。
 - `.github/workflows/alioss-update-auto.yml`：GitHub Actions 工作流，自动化申请证书并更新 OSS 证书。
 
 ## 阿里云 ACCESS KEY 权限说明（偷懒版）
@@ -18,39 +19,60 @@
 
 ## 使用方法
 ### 1. 配置 Secrets
-在 GitHub 仓库的 Settings > Secrets 中添加以下密钥：
-- `ACCESS_KEY_ID`：阿里云 AccessKeyId
-- `ACCESS_KEY_SECRET`：阿里云 AccessKeySecret
-- `ENDPOINT`：OSS Endpoint，例如 `oss-cn-hangzhou.aliyuncs.com`
-- `BUCKET_NAME`：OSS Bucket 名称， 例如 `example-bucket`
-- `DOMAIN`：需要绑定证书的自定义域名（如 `oss.example.com`）
-- `REGION`：阿里云区域（如 `cn-hangzhou`）
-- `EMAIL`：用于申请证书的邮箱
+在 GitHub 仓库的 Settings > Secrets and variables > Actions 中添加以下密钥：
 
-### 2. 工作流自动执行
-每周日自动执行，也可手动触发。流程如下：
-1. 申请新的 Let's Encrypt 证书，证书文件保存于 `/etc/letsencrypt/live/$DOMAIN/`。
-2. 读取 `fullchain.pem` 和 `privkey.pem`，自动传递给 `oss_update.py`。
-3. `oss_update.py` 自动将新证书绑定到 OSS Bucket 的自定义域名。
+| Secret | 说明 |
+| --- | --- |
+| `ACCESS_KEY_ID` | 阿里云 AccessKeyId |
+| `ACCESS_KEY_SECRET` | 阿里云 AccessKeySecret |
+| `ENDPOINT` | OSS Endpoint，例如 `oss-cn-hangzhou.aliyuncs.com` |
+| `REGION` | 阿里云区域（如 `cn-hangzhou`） |
+| `EMAIL` | 用于申请证书的邮箱 |
+| `DOMAIN_1` / `DOMAIN_2` / `DOMAIN_3` | 需要绑定证书的自定义域名 |
+| `BUCKET_NAME_1` / `BUCKET_NAME_2` / `BUCKET_NAME_3` | 与域名编号一一对应的 OSS Bucket |
 
-### 3. 手动运行脚本
+> 编号按顺序一一配对：`DOMAIN_1` ↔ `BUCKET_NAME_1`、`DOMAIN_2` ↔ `BUCKET_NAME_2`、`DOMAIN_3` ↔ `BUCKET_NAME_3`。
+> 顺序本身不重要，只要同一编号下是「同一个域名 + 它的 Bucket」即可。
+> 三个 Bucket 需在同一区域，共用 `ENDPOINT` / `REGION`。
+
+### 2. 域名数量变更
+工作流目前固定读取 3 组（`DOMAIN_1~3` / `BUCKET_NAME_1~3`）。增删域名时：
+1. 在仓库里增删对应的 Secrets；
+2. 同步修改 `.github/workflows/alioss-update-auto.yml` 中 job 的 `env`，以及两个步骤里的 `DOMAINS` / `BUCKETS` 数组。
+
+### 3. 工作流自动执行
+每月 2 日 20:00 UTC（北京时间 3 日 04:00）自动执行，也可在 Actions 页面手动触发。流程如下：
+1. 读取 `DOMAIN_1~3`，用 certbot 一次申请一张覆盖所有域名的 SAN 证书，保存于 `/etc/letsencrypt/live/<CERT_NAME>/`（`CERT_NAME` 在工作流 env 中，默认 `jianglu-oss`）。
+2. 通过 `alidns.sh` 完成每个域名的 DNS-01 验证。
+3. 读取 `fullchain.pem` 和 `privkey.pem`，按 `DOMAIN_N ↔ BUCKET_NAME_N` 逐个绑定到各自 Bucket 的自定义域名。
+
+certbot 默认只在证书到期前 30 天内才续期；OSS 上若已绑定同一张证书，脚本会自动跳过，不会重复上传。
+
+### 4. 手动运行脚本
 如需本地手动运行：
+
 ```bash
 pip install -r requirements.txt
 python oss_update.py \
+  --domain oss.jianglu.xyz    --bucket jiangluxyz \
+  --domain assets.jianglu.xyz --bucket jiangluxyz-assets \
+  --domain static.jianglu.xyz --bucket jiangluxyz-static \
   --access-key-id <你的AccessKeyId> \
   --access-key-secret <你的AccessKeySecret> \
   --endpoint <你的Endpoint> \
-  --bucket-name <你的Bucket名称> \
-  --target-cname <你的自定义域名> \
-  --private-key "$(cat /etc/letsencrypt/live/<你的域名>/privkey.pem)" \
-  --certificate "$(cat /etc/letsencrypt/live/<你的域名>/fullchain.pem)"
+  --region <你的Region> \
+  --private-key "$(sudo cat /etc/letsencrypt/live/jianglu-oss/privkey.pem)" \
+  --certificate "$(sudo cat /etc/letsencrypt/live/jianglu-oss/fullchain.pem)"
 ```
 
 ## 注意事项
-- 证书和私钥文件需有读取权限。
-- 阿里云账号需有 OSS 管理权限。
-- 建议定期检查 workflow 执行结果。
+- 首次新增域名时，要先在 OSS 控制台为对应 Bucket 绑定自定义域名并配置 CNAME 解析；本脚本只负责更新该域名的证书，不会自动创建 CNAME 绑定。
+- 新增或删除域名后，修改 Secrets 和工作流中的域名/Bucket 数组，并手动触发一次 workflow；certbot 已加 `--expand`，非交互模式也能扩展证书域名。
+- GitHub Actions 的每个 runner 都是全新环境，`/etc/letsencrypt` 不会跨次保留，因此每次运行都会重新签发一张证书。每月 1 次远低于 Let's Encrypt 的限流（同一域名集合每周最多 5 张），可以正常使用；如果想减少签发次数，可以自行用 `actions/cache` 持久化 certbot 配置目录。
+- GitHub Actions 的 cron 使用 UTC 时间，`TZ` 环境变量对 cron 不生效。
+- GitHub 会在仓库长期（约 60 天）没有提交时自动停用定时 workflow，建议偶尔手动触发一次，避免证书续期中断。
+- 证书和私钥文件需有读取权限；阿里云账号需有 OSS 管理权限。
+- 不要高频使用强制续期（`--force-renewal`），以免触发 Let's Encrypt 的证书签发限流。
 
 ## 致谢
 感谢 [hui-shao/AliyunOSS_Cert_Update](https://github.com/hui-shao/AliyunOSS_Cert_Update) 提供的 OSS 证书上传教程。
