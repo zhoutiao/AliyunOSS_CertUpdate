@@ -74,6 +74,25 @@ python oss_update.py \
 - 证书和私钥文件需有读取权限；阿里云账号需有 OSS 管理权限。
 - 不要高频使用强制续期（`--force-renewal`），以免触发 Let's Encrypt 的证书签发限流。
 
+## 常见问题
+
+### Actions 更新 OSS 证书时报 `AttributeError: module 'lib' has no attribute 'GEN_EMAIL'`
+
+原因：`oss2 → aliyunsdkcore（内置 urllib3）` 会 import `pyOpenSSL`，而 `aliyunsdkcore` 依赖 `cryptography`。
+GitHub runner 通过 apt 安装 certbot 时会带入系统旧版 `pyOpenSSL`（Ubuntu 24.04 为 23.2.0），它只兼容 `cryptography < 42`；
+pip 安装新版 `cryptography` 后两者混用，就会报上面的错。
+
+`requirements.txt` 已显式安装新版 `pyOpenSSL`（`pyOpenSSL>=24`），让 pip 把 `pyOpenSSL + cryptography` 作为一对管理；
+用户级 site-packages 优先于系统 dist-packages，不会再加载系统旧版 pyOpenSSL。
+工作流里也加了 `Verify Python dependencies` 步骤，用于在签发证书前提前发现这类依赖问题。
+
+如果本地环境混装过旧版本，重装依赖即可：
+
+```bash
+pip uninstall -y pyOpenSSL cryptography
+pip install -r requirements.txt
+```
+
 ## 致谢
 感谢 [hui-shao/AliyunOSS_Cert_Update](https://github.com/hui-shao/AliyunOSS_Cert_Update) 提供的 OSS 证书上传教程。
 感谢 [justjavac/certbot-dns-aliyun](https://github.com/justjavac/certbot-dns-aliyun) 的证书申请教程。

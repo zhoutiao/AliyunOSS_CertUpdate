@@ -2,5 +2,11 @@ oss2>=2.19.1
 requests>=2.32.3
 aliyun-python-sdk-alidns>=3.0.7
 aliyun-python-sdk-core>=2.16.0
-# 用于解析本地证书到期时间，避免 OSS 证书重复绑定；未安装时脚本会自动降级
-cryptography>=42.0.0
+
+# oss2 -> aliyunsdkcore（内置 urllib3）会 import pyOpenSSL，而 aliyunsdkcore 依赖 cryptography。
+# pip 会装新版 cryptography，但 GitHub Actions runner 用 apt 装 certbot 时带入的系统 pyOpenSSL
+# （Ubuntu 24.04 为 23.2.0）只兼容 cryptography<42，混用会报：
+#   AttributeError: module 'lib' has no attribute 'GEN_EMAIL'
+# 这里显式安装新版 pyOpenSSL，让 pip 把 pyOpenSSL + cryptography 作为一对管理；
+# 用户级 site-packages 优先于系统 dist-packages，不会再加载系统旧版 pyOpenSSL。
+pyOpenSSL>=24.0.0

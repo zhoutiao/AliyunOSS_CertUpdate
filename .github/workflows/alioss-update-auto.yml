@@ -33,7 +33,12 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y certbot
+          # requirements.txt 会显式安装新版 pyOpenSSL，避免与系统旧版混用导致 oss2 导入失败
           pip install -r requirements.txt
+
+      - name: Verify Python dependencies
+        run: |
+          python -c "import OpenSSL, oss2; print('oss2', oss2.__version__, '| pyOpenSSL', OpenSSL.__version__, '|', OpenSSL.__file__)"
 
       - name: Install Aliyun CLI and DNS Hook
         run: |
